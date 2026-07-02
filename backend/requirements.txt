@@ -1,0 +1,17 @@
+fastapi[standard]==0.138.1
+pymongo==4.12.1               # includes native AsyncMongoClient (replaces Motor)
+pyjwt[crypto]==2.10.1         # replaces unmaintained python-jose
+bcrypt==4.3.0                 # direct usage; passlib 1.7.x is unmaintained & incompatible with bcrypt 4.x
+pydantic-settings==2.9.1
+slowapi==0.1.9
+pypdf==6.14.2                 # PdfReader API (PdfFileReader removed)
+python-docx==1.2.0            # Document() factory API
+langgraph==1.2.7
+langchain-google-genai==4.2.6
+langchain-core==1.4.8
+uvicorn[standard]==0.34.3
+
+# Testing
+pytest==8.4.0
+pytest-asyncio==0.25.3
+httpx==0.28.1                 # async test client for FastAPI
