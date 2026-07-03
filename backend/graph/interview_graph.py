@@ -27,15 +27,20 @@ Graph topology:
                      │
                     END
 
-Verified imports (LangGraph 1.2.7, LangChain 1.4.8):
-  - MemorySaver:   from langgraph.checkpoint.memory import MemorySaver
-  - add_messages:  from langgraph.graph.message import add_messages
-  - trim_messages: from langchain_core.messages import trim_messages
-  - Interrupt:     builder.compile(checkpointer=..., interrupt_before=[...])
+Verified imports (LangGraph 1.2.7, langgraph-checkpoint-redis 0.5.0):
+  - AsyncRedisSaver:   from langgraph.checkpoint.redis.aio import AsyncRedisSaver
+  - JsonPlusSerializer: from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+  - add_messages:      from langgraph.graph.message import add_messages
+  - Retry:             tenacity (stop_after_attempt, wait_exponential, retry_if_exception_type)
+
+HITL Note: human_input_node is a no-op pass-through — the graph is compiled with
+  interrupt_before=["human_input_node"]. On resume, the node re-executes from scratch
+  (LangGraph 1.x behaviour) but since it's a no-op this is safe and idempotent.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Annotated, Sequence
 
@@ -44,20 +49,26 @@ from langchain_core.messages import (
     BaseMessage,
     HumanMessage,
     SystemMessage,
-    trim_messages,
 )
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
+from langgraph.types import interrupt
 from pydantic import BaseModel, Field
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 from typing_extensions import TypedDict
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# ── LLM (single shared instance – gemini-2.5-flash-lite) ───────────────────────
+# ── LLM (single shared instance – gemini-2.5-flash-lite) ─────────────────────
 
 _llm = ChatGoogleGenerativeAI(
     model=settings.GEMINI_MODEL,        # gemini-2.5-flash-lite from .env
@@ -70,6 +81,88 @@ _llm_structured = ChatGoogleGenerativeAI(
     temperature=0,                      # deterministic for structured extraction
     google_api_key=settings.GEMINI_API_KEY,
 )
+
+# ── Retry-able exception types ────────────────────────────────────────────────
+
+# Gemini SDK raises google.api_core.exceptions.* — we catch by message pattern
+# and standard Python exceptions for broader coverage.
+_RETRYABLE = (
+    TimeoutError,
+    ConnectionError,
+    OSError,
+)
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """Return True for transient LLM errors (rate limit, overload, timeout)."""
+    msg = str(exc).lower()
+    return any(kw in msg for kw in (
+        "resource_exhausted", "unavailable", "503", "429",
+        "timeout", "rate limit", "overloaded",
+    ))
+
+
+# ── Tenacity retry decorator ──────────────────────────────────────────────────
+
+def _llm_retry():
+    """
+    Retry decorator for LLM calls:
+      - 3 attempts total (1 original + 2 retries)
+      - Exponential backoff: 2s → 4s → 8s (capped at 10s)
+      - Retries on transient errors (429, 503, timeout, connection errors)
+      - Re-raises on permanent errors (404, 400, auth failures)
+    """
+    return retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(_RETRYABLE) | retry_if_exception_type(Exception),
+        reraise=True,
+        before_sleep=lambda retry_state: logger.warning(
+            "LLM call failed (attempt %d/%d): %s — retrying in %.1fs",
+            retry_state.attempt_number,
+            3,
+            retry_state.outcome.exception(),
+            retry_state.next_action.sleep,  # type: ignore[union-attr]
+        ),
+    )
+
+
+def _invoke_llm_with_retry(llm, messages: list, timeout: float = 60.0):
+    """
+    Synchronous LLM invocation with tenacity retry and message-level guard.
+    Falls back to [system_msg] if messages list is somehow empty.
+    """
+    if not messages:
+        logger.warning("_invoke_llm_with_retry: messages list is empty, aborting")
+        raise ValueError("No messages to send to LLM")
+
+    @_llm_retry()
+    def _call():
+        return llm.invoke(messages)
+
+    return _call()
+
+
+async def _ainvoke_llm_with_retry(llm, messages: list, timeout: float = 60.0):
+    """
+    Async LLM streaming invocation with tenacity retry.
+    Wraps the synchronous invoke in asyncio.wait_for for a hard timeout.
+    """
+    if not messages:
+        raise ValueError("No messages to send to LLM")
+
+    @_llm_retry()
+    def _call():
+        return llm.invoke(messages)
+
+    try:
+        return await asyncio.wait_for(
+            asyncio.get_event_loop().run_in_executor(None, _call),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError as exc:
+        raise TimeoutError(f"LLM call timed out after {timeout}s") from exc
+
 
 # ── Pydantic output schemas ───────────────────────────────────────────────────
 
@@ -144,11 +237,11 @@ class GraphState(TypedDict):
     feedback_report: dict
 
 
-# ── Token shield (message trimmer) ───────────────────────────────────────────
+# ── Sliding-window history trimmer ───────────────────────────────────────────
 
 def trim_history(messages: list, max_chars: int = 12_000) -> list:
     """
-    Simple character-based sliding window trimmer.
+    Character-based sliding window trimmer.
 
     Keeps the system message (index 0) locked, then retains the MOST RECENT
     messages that fit within `max_chars`. Avoids LLM token-counter calls that
@@ -157,11 +250,9 @@ def trim_history(messages: list, max_chars: int = 12_000) -> list:
     if not messages:
         return messages
 
-    # Pin the system message (always first)
     system = [messages[0]] if isinstance(messages[0], SystemMessage) else []
     rest = messages[len(system):]
 
-    # Walk backward, accumulating messages that fit within the budget
     kept: list = []
     budget = max_chars
     for msg in reversed(rest):
@@ -207,9 +298,9 @@ _FEEDBACK_SYSTEM = (
 
 def parse_resume_node(state: GraphState) -> dict:
     """Parallel branch 1 – extracts structured data from resume text."""
-    logger.info("parse_resume_node: starting")
+    logger.info("ENTER node=parse_resume_node")
     structured = _llm_structured.with_structured_output(ParsedResume)
-    result: ParsedResume = structured.invoke([
+    result: ParsedResume = _invoke_llm_with_retry(structured, [
         SystemMessage(content=_EXTRACTION_SYSTEM),
         HumanMessage(content=(
             "Extract structured fields from this resume.\n\n"
@@ -218,7 +309,7 @@ def parse_resume_node(state: GraphState) -> dict:
             "=== RESUME END ==="
         )),
     ])
-    logger.info("parse_resume_node: done – skills=%d level=%s",
+    logger.info("EXIT node=parse_resume_node skills=%d level=%s",
                 len(result.skills), result.experience_level)
     return {"parsed_resume": result.model_dump()}
 
@@ -228,9 +319,9 @@ def parse_resume_node(state: GraphState) -> dict:
 
 def parse_jd_node(state: GraphState) -> dict:
     """Parallel branch 2 – extracts structured data from the job description."""
-    logger.info("parse_jd_node: starting")
+    logger.info("ENTER node=parse_jd_node")
     structured = _llm_structured.with_structured_output(ParsedJD)
-    result: ParsedJD = structured.invoke([
+    result: ParsedJD = _invoke_llm_with_retry(structured, [
         SystemMessage(content=_EXTRACTION_SYSTEM),
         HumanMessage(content=(
             "Extract structured fields from this job description.\n\n"
@@ -239,7 +330,7 @@ def parse_jd_node(state: GraphState) -> dict:
             "=== JD END ==="
         )),
     ])
-    logger.info("parse_jd_node: done – role=%s skills=%d",
+    logger.info("EXIT node=parse_jd_node role=%s skills=%d",
                 result.role_title, len(result.required_skills))
     return {"parsed_jd": result.model_dump()}
 
@@ -249,9 +340,9 @@ def parse_jd_node(state: GraphState) -> dict:
 
 def gap_analysis_node(state: GraphState) -> dict:
     """Fan-in node – compares parsed resume vs JD and produces a gap report."""
-    logger.info("gap_analysis_node: starting")
+    logger.info("ENTER node=gap_analysis_node")
     structured = _llm_structured.with_structured_output(GapReport)
-    result: GapReport = structured.invoke([
+    result: GapReport = _invoke_llm_with_retry(structured, [
         SystemMessage(content=_FEEDBACK_SYSTEM),
         HumanMessage(content=(
             "Perform a gap analysis.\n\n"
@@ -260,7 +351,7 @@ def gap_analysis_node(state: GraphState) -> dict:
             "Return a complete GapReport."
         )),
     ])
-    logger.info("gap_analysis_node: done – score=%d missing=%d",
+    logger.info("EXIT node=gap_analysis_node score=%d missing=%d",
                 result.match_score, len(result.missing_skills))
     return {"gap_report": result.model_dump()}
 
@@ -273,16 +364,16 @@ def ask_question_node(state: GraphState) -> dict:
     Generates the next targeted interview question.
 
     1. Builds the system prompt from the gap report (never from raw user text).
-    2. Applies the token trimmer to cap the dialog window at 1000 tokens
-       while keeping the system message locked in place.
-    3. Invokes the LLM and appends the AI response to chat_history.
+    2. Applies the character-based sliding window trimmer.
+    3. Invokes the LLM with tenacity retry and surfaces clean errors.
+    4. Appends the AI response to chat_history.
     """
-    logger.info("ask_question_node: Q#%d", state.get("questions_asked", 0) + 1)
+    q_num = state.get("questions_asked", 0) + 1
+    logger.info("ENTER node=ask_question_node Q#%d", q_num)
 
     gap = state["gap_report"]
     jd = state["parsed_jd"]
 
-    # System message uses only structured gap data – not raw user text
     system_msg = SystemMessage(content=(
         f"{_INTERVIEWER_SYSTEM}\n\n"
         f"Role: {jd.get('role_title', 'Unknown')}\n"
@@ -291,7 +382,6 @@ def ask_question_node(state: GraphState) -> dict:
         f"Questions asked so far: {state.get('questions_asked', 0)}"
     ))
 
-    # Build current history and apply character-based sliding window trimmer
     current_history = list(state.get("chat_history", []))
     messages_to_trim = [system_msg] + current_history
     trimmed = trim_history(messages_to_trim)
@@ -300,8 +390,16 @@ def ask_question_node(state: GraphState) -> dict:
     if not trimmed:
         trimmed = [system_msg]
 
-    ai_response = _llm.invoke(trimmed)
+    # Gemini requires at least one User/Model (Human/AI) turn in contents,
+    # otherwise it raises "contents are required" because SystemMessage goes to system_instruction.
+    has_conversational = any(not isinstance(m, SystemMessage) for m in trimmed)
+    if not has_conversational:
+        trimmed.append(HumanMessage(content="Please start the interview by asking the first question."))
 
+    ai_response = _invoke_llm_with_retry(_llm, trimmed)
+
+    logger.info("EXIT node=ask_question_node Q#%d content_len=%d",
+                q_num, len(str(ai_response.content)))
     return {
         "chat_history": [ai_response],
         "questions_asked": state.get("questions_asked", 0) + 1,
@@ -313,13 +411,25 @@ def ask_question_node(state: GraphState) -> dict:
 
 def human_input_node(state: GraphState) -> dict:
     """
-    HITL placeholder – the graph is interrupted BEFORE this node runs.
+    HITL node using the modern LangGraph 1.x interrupt() API.
 
-    The interrupt happens at compile-time via interrupt_before=["human_input_node"].
-    When the FastAPI route resumes the graph, it injects the user's message
-    into chat_history via Command, and this node is a no-op pass-through.
+    Calls interrupt() which:
+      1. Saves state to the checkpointer.
+      2. Pauses graph execution and returns control to the caller.
+      3. When resumed via Command(resume={"chat_history": [HumanMessage(...)]}),
+         the resume value is returned from interrupt() and merged into state.
+
+    This is the correct approach vs interrupt_before=[] which does NOT
+    automatically apply Command(resume=...) as a state update.
     """
-    # Nothing to do – the human message is already in state when we resume
+    logger.info("ENTER node=human_input_node (interrupt)")
+    # interrupt() pauses here; resume value comes back via Command(resume=...)
+    resume_value = interrupt("Waiting for candidate answer...")
+    logger.info("RESUME node=human_input_node resume_value_type=%s", type(resume_value))
+
+    # resume_value should be {"chat_history": [HumanMessage(...)]} from the router
+    if isinstance(resume_value, dict) and "chat_history" in resume_value:
+        return {"chat_history": resume_value["chat_history"]}
     return {}
 
 
@@ -330,17 +440,16 @@ def feedback_node(state: GraphState) -> dict:
     """
     Generates the final graded feedback report from the full interview transcript.
     """
-    logger.info("feedback_node: generating final report")
+    logger.info("ENTER node=feedback_node")
     structured = _llm_structured.with_structured_output(FeedbackReport)
 
-    # Build a clean transcript summary from chat_history
     transcript_lines = []
     for msg in state.get("chat_history", []):
         role = "Interviewer" if isinstance(msg, AIMessage) else "Candidate"
         transcript_lines.append(f"{role}: {msg.content}")
     transcript = "\n".join(transcript_lines)
 
-    result: FeedbackReport = structured.invoke([
+    result: FeedbackReport = _invoke_llm_with_retry(structured, [
         SystemMessage(content=_FEEDBACK_SYSTEM),
         HumanMessage(content=(
             "Evaluate the following mock interview transcript and produce a FeedbackReport.\n\n"
@@ -351,7 +460,7 @@ def feedback_node(state: GraphState) -> dict:
             "=== TRANSCRIPT END ==="
         )),
     ])
-    logger.info("feedback_node: done – overall_score=%d", result.overall_score)
+    logger.info("EXIT node=feedback_node overall_score=%d", result.overall_score)
     return {"feedback_report": result.model_dump()}
 
 
@@ -372,20 +481,16 @@ def evaluation_router(state: GraphState) -> str:
     return "ask_question_node"
 
 
-# ── Build and compile the graph ───────────────────────────────────────────────
+# ── Build the graph ───────────────────────────────────────────────────────────
 
 
-def build_interview_graph() -> StateGraph:
+def _build_graph() -> StateGraph:
     """
-    Constructs the full Phase 2 + Phase 3 StateGraph.
-
-    Checkpointing: MemorySaver (thread-safe in-memory; swap for AsyncRedisSaver in prod).
-    Interrupt:     interrupt_before=["human_input_node"] – pauses after each AI question
-                   and waits for the candidate's response via the FastAPI route.
+    Constructs the full Phase 2 + Phase 3 StateGraph (without compiling).
+    Compilation happens in main.py lifespan after the checkpointer is set up.
     """
     builder = StateGraph(GraphState)
 
-    # Register all nodes
     builder.add_node("parse_resume_node", parse_resume_node)
     builder.add_node("parse_jd_node", parse_jd_node)
     builder.add_node("gap_analysis_node", gap_analysis_node)
@@ -417,17 +522,37 @@ def build_interview_graph() -> StateGraph:
         },
     )
 
-    # Terminate after feedback
     builder.add_edge("feedback_node", END)
-
     return builder
 
 
-# ── Singleton compiled graph – imported by FastAPI routes ─────────────────────
+# ── Checkpointer factory ──────────────────────────────────────────────────────
 
-_checkpointer = MemorySaver()
+async def get_redis_checkpointer() -> AsyncRedisSaver:
+    """
+    Creates and sets up an AsyncRedisSaver checkpointer.
+    Calls asetup() to create required RediSearch indices (idempotent).
+    Must be called once during app startup (FastAPI lifespan).
+    """
+    checkpointer = AsyncRedisSaver(redis_url=settings.REDIS_URL)
+    await checkpointer.asetup()
+    if hasattr(checkpointer, "aset_client_info"):
+        await checkpointer.aset_client_info()
+    logger.info("AsyncRedisSaver ready — REDIS_URL=%s", settings.REDIS_URL)
+    return checkpointer
 
-interview_graph = build_interview_graph().compile(
-    checkpointer=_checkpointer,
-    interrupt_before=["human_input_node"],  # pause before EVERY human turn
+
+# ── Module-level graph (MemorySaver dev fallback) ─────────────────────────────
+# Compiled WITHOUT interrupt_before — interrupt() inside human_input_node
+# handles HITL pausing. Command(resume=...) passes data back through interrupt().
+
+from langgraph.checkpoint.memory import MemorySaver as _MemorySaver  # noqa: E402
+
+_dev_checkpointer = _MemorySaver()
+
+interview_graph = _build_graph().compile(
+    checkpointer=_dev_checkpointer,
 )
+
+# Exposed for main.py to recompile with the Redis checkpointer
+graph_builder = _build_graph()

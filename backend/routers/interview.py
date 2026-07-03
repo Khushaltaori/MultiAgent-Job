@@ -2,7 +2,7 @@
 Interview router – /api/v1/interview
 
 Endpoints:
-  POST /start   – Initialise a new interview session (returns thread_id).
+  POST /start   – Initialise a new interview session (returns thread_id via SSE).
   POST /respond – Resume graph with candidate answer; streams AI question as SSE.
   GET  /state   – Inspect current graph state for a thread.
   GET  /report  – Return the final feedback report once interview is complete.
@@ -13,6 +13,9 @@ HITL flow:
   2. /respond → graph is resumed with the candidate's answer as a HumanMessage,
                 runs until the next interrupt or END, streams next AI question.
   3. After MAX_QUESTIONS answers, graph exits to feedback_node, /report returns results.
+
+Rate limiting: both /start and /respond are decorated with RATE_LIMIT_INTERVIEW
+  (default 30/minute) — the most expensive routes (LLM call per request).
 
 SSE uses FastAPI's native EventSourceResponse (FastAPI 0.135+ stable API).
 """
@@ -25,12 +28,14 @@ import uuid
 from collections.abc import AsyncGenerator
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.sse import EventSourceResponse, ServerSentEvent, format_sse_event
+from fastapi.sse import EventSourceResponse, format_sse_event
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.types import Command
 from pydantic import BaseModel, Field
 
 from app.auth import get_current_user
+from app.config import settings
+from app.limiter import limiter
 from app.models import TokenPayload
 from app.sanitize import sanitize_text
 
@@ -70,15 +75,16 @@ async def _stream_ai_question(
     """
     Async generator that streams tokens from the graph as SSE events.
 
-    Each token chunk → ServerSentEvent(data=token, event="token")
-    Graph interrupt   → ServerSentEvent(data=json, event="interrupt")
-    Graph END         → ServerSentEvent(data=json, event="done")
-    Error             → ServerSentEvent(data=str,  event="error")
+    Event types:
+      token     – individual AI token chunk
+      interrupt – graph paused at human_input_node (awaiting answer)
+      done      – interview complete, contains feedback_report
+      error     – clean error surface (LLM retry exhausted, graph crash, etc.)
     """
-    from graph.interview_graph import interview_graph
+    import graph.interview_graph as _ig
 
     try:
-        async for event in interview_graph.astream(
+        async for event in _ig.interview_graph.astream(
             input_payload,
             config=config,
             stream_mode="messages",   # yields (message_chunk, metadata) tuples
@@ -86,7 +92,7 @@ async def _stream_ai_question(
             # stream_mode="messages" yields (chunk, metadata) pairs
             if isinstance(event, tuple):
                 chunk, metadata = event
-                # Only stream AI message content tokens
+                # Only stream AI message content tokens from the question node
                 if (
                     isinstance(chunk, AIMessage)
                     and chunk.content
@@ -97,8 +103,8 @@ async def _stream_ai_question(
                         event="token",
                     )
 
-        # After streaming completes, check final graph state
-        snapshot = interview_graph.get_state(config)
+        # After streaming completes, check final graph state (async)
+        snapshot = await _ig.interview_graph.aget_state(config)
         next_nodes = snapshot.next
 
         if not next_nodes:
@@ -109,10 +115,11 @@ async def _stream_ai_question(
                 event="done",
             )
         elif "human_input_node" in next_nodes:
-            # Graph paused at interrupt → waiting for next answer
+            # Graph paused at interrupt() inside human_input_node
             questions_asked = snapshot.values.get("questions_asked", 0)
             yield format_sse_event(
                 data_str=json.dumps({
+                    "thread_id": thread_id,
                     "questions_asked": questions_asked,
                     "max_questions": 3,
                     "status": "awaiting_answer",
@@ -122,8 +129,12 @@ async def _stream_ai_question(
 
     except Exception as exc:
         logger.error("SSE stream error for thread=%s: %s", thread_id, exc)
+        # Surface a clean error event instead of letting the connection hang
         yield format_sse_event(
-            data_str=str(exc),
+            data_str=json.dumps({
+                "error": str(exc),
+                "thread_id": thread_id,
+            }),
             event="error",
         )
 
@@ -134,6 +145,7 @@ async def _stream_ai_question(
     "/start",
     summary="Start a new mock interview session",
 )
+@limiter.limit(settings.RATE_LIMIT_INTERVIEW)
 async def start_interview(
     request: Request,
     body: StartRequest,
@@ -147,8 +159,7 @@ async def start_interview(
     thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
 
-    # Double-sanitize at the API boundary (already sanitized by ingestion,
-    # but we defend in depth — never trust data crossing a network hop).
+    # Double-sanitize at the API boundary (defence in depth)
     clean_resume = sanitize_text(body.resume_text)
     clean_jd = sanitize_text(body.jd_text)
 
@@ -163,8 +174,7 @@ async def start_interview(
         "feedback_report": {},
     }
 
-    logger.info("Starting interview session thread_id=%s user=%s",
-                thread_id, current_user.sub)
+    logger.info("START interview thread_id=%s user=%s", thread_id, current_user.sub)
 
     async def event_generator() -> AsyncGenerator[bytes, None]:
         # First, emit the thread_id so the client can store it
@@ -172,7 +182,6 @@ async def start_interview(
             data_str=json.dumps({"thread_id": thread_id}),
             event="session",
         )
-        # Then stream the graph run
         async for event in _stream_ai_question(thread_id, config, initial_state):
             yield event
 
@@ -185,6 +194,7 @@ async def start_interview(
     "/respond",
     summary="Submit candidate answer and receive the next question via SSE",
 )
+@limiter.limit(settings.RATE_LIMIT_INTERVIEW)
 async def respond_to_interview(
     request: Request,
     body: RespondRequest,
@@ -200,13 +210,13 @@ async def respond_to_interview(
          hits evaluation_router, then either asks another Q or generates feedback.
       4. Stream the next AI question or the final done event.
     """
-    from graph.interview_graph import interview_graph
+    import graph.interview_graph as _ig
 
     config = {"configurable": {"thread_id": body.thread_id}}
 
-    # Verify the session exists
+    # Verify the session exists (async)
     try:
-        snapshot = interview_graph.get_state(config)
+        snapshot = await _ig.interview_graph.aget_state(config)
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -222,8 +232,7 @@ async def respond_to_interview(
     # Sanitize the answer before injecting into the graph
     clean_answer = sanitize_text(body.answer, max_length=4_000)
 
-    # Prompt-injection defence: wrap answer as a HumanMessage with a prefix
-    # that signals to the LLM this is candidate response data, not instructions.
+    # Prompt-injection defence: label the answer as candidate data
     human_msg = HumanMessage(
         content=f"[CANDIDATE ANSWER]\n{clean_answer}",
     )
@@ -233,7 +242,7 @@ async def respond_to_interview(
         resume={"chat_history": [human_msg]},
     )
 
-    logger.info("Resuming interview thread_id=%s user=%s Q#%d",
+    logger.info("RESUME interview thread_id=%s user=%s Q#%d",
                 body.thread_id, current_user.sub,
                 snapshot.values.get("questions_asked", 0))
 
@@ -254,11 +263,11 @@ async def get_interview_state(
     thread_id: str,
     current_user: TokenPayload = Depends(get_current_user),
 ) -> dict:
-    from graph.interview_graph import interview_graph
+    import graph.interview_graph as _ig
 
     config = {"configurable": {"thread_id": thread_id}}
     try:
-        snapshot = interview_graph.get_state(config)
+        snapshot = await _ig.interview_graph.aget_state(config)
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -285,11 +294,11 @@ async def get_feedback_report(
     thread_id: str,
     current_user: TokenPayload = Depends(get_current_user),
 ) -> dict:
-    from graph.interview_graph import interview_graph
+    import graph.interview_graph as _ig
 
     config = {"configurable": {"thread_id": thread_id}}
     try:
-        snapshot = interview_graph.get_state(config)
+        snapshot = await _ig.interview_graph.aget_state(config)
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

@@ -10,6 +10,7 @@ Wires together:
 
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -20,6 +21,8 @@ from fastapi.responses import JSONResponse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+
+logger = logging.getLogger(__name__)
 
 from app.config import settings
 from app.database import connect_to_mongo, close_mongo_connection
@@ -36,8 +39,26 @@ from routers.interview import router as interview_router
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Startup / shutdown hooks."""
+    # 1. MongoDB
     await connect_to_mongo()
+
+    # 2. Redis checkpointer — recompile interview_graph with AsyncRedisSaver.
+    #    Falls back to the MemorySaver dev graph if Redis is unreachable.
+    import graph.interview_graph as _ig
+    try:
+        redis_cp = await _ig.get_redis_checkpointer()
+        _ig.interview_graph = _ig.graph_builder.compile(
+            checkpointer=redis_cp,
+        )
+        logger.info("interview_graph compiled with AsyncRedisSaver")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Redis unavailable (%s) — interview_graph using MemorySaver fallback", exc
+        )
+
     yield
+
+    # Shutdown
     await close_mongo_connection()
 
 

@@ -21,7 +21,11 @@ class Settings(BaseSettings):
     FRONTEND_ORIGIN: str = "http://localhost:3000"
 
     # Rate limiting
-    RATE_LIMIT_AUTH: str = "10/minute"  # applied to /register & /login
+    RATE_LIMIT_AUTH: str = "10/minute"       # applied to /register & /login
+    RATE_LIMIT_INTERVIEW: str = "30/minute"  # applied to /interview/start & /respond
+
+    # Redis (AsyncRedisSaver checkpointer)
+    REDIS_URL: str = "redis://localhost:6379"
 
     # Google Gemini
     GEMINI_API_KEY: str   # read from GEMINI_API_KEY in .env
