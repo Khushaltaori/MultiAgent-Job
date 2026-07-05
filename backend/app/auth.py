@@ -47,7 +47,7 @@ def verify_password(plain: str, hashed: str) -> bool:
 _bearer = HTTPBearer(auto_error=True)
 
 
-def _make_token(subject: str, token_type: str, expire_delta: timedelta) -> str:
+def _make_token(subject: str, token_type: str, expire_delta: timedelta, extra: dict | None = None) -> str:
     """Create a signed JWT with PyJWT (HS256)."""
     now = datetime.now(tz=timezone.utc)
     payload = {
@@ -55,15 +55,17 @@ def _make_token(subject: str, token_type: str, expire_delta: timedelta) -> str:
         "type": token_type,
         "iat": now,
         "exp": now + expire_delta,
+        **(extra or {}),
     }
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
-def create_access_token(subject: str) -> str:
+def create_access_token(subject: str, name: str = "") -> str:
     return _make_token(
         subject,
         "access",
         timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
+        extra={"name": name},
     )
 
 

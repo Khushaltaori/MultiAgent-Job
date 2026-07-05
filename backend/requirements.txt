@@ -11,6 +11,7 @@ langgraph-checkpoint-redis==0.5.0  # AsyncRedisSaver for prod HITL checkpointing
 redis[asyncio]>=6.2.0              # async Redis client (redisvl dependency)
 tenacity==9.1.2                    # retry / exponential-backoff for LLM calls
 langchain-google-genai==4.2.6
+langchain-groq==1.1.3
 langchain-core==1.4.8
 uvicorn[standard]==0.34.3
 

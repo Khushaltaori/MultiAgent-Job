@@ -32,24 +32,100 @@ Key implementation decisions:
 from __future__ import annotations
 
 import logging
+import os
 from typing import TypedDict
-
+from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_groq import ChatGroq
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
+from tenacity import (
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# ── LLM (shared, instantiated once) ───────────────────────────────────
+# ── LLM (primary Gemini + fallback Groq) ──────────────────────────────────────
 
-_llm = ChatGoogleGenerativeAI(
-    model=settings.GEMINI_MODEL,           # gemini-2.5-flash-lite
-    temperature=0,                          # deterministic structured extraction
+_primary_llm_structured = ChatGoogleGenerativeAI(
+    model=settings.GEMINI_MODEL,
+    temperature=0,                      # deterministic structured extraction
     google_api_key=settings.GEMINI_API_KEY,
 )
+
+_fallback_llm_structured = ChatGroq(
+    model="llama-3.3-70b-versatile",
+    temperature=0,
+    groq_api_key=settings.GROQ_API_KEY or os.getenv("GROQ_API_KEY") or "DUMMY_KEY",
+)
+
+# Defined at module scope for unit testing patch/mock compatibility.
+# If a test patches _llm_structured, _make_structured_chain will yield the test mock.
+_llm_structured = _primary_llm_structured
+
+def _make_structured_chain(schema):
+    """
+    Returns a resilient structured-output chain:
+      primary.with_structured_output(schema).with_fallbacks([fallback.with_structured_output(schema)])
+    """
+    # If a unit test has patched _llm_structured, call with_structured_output on the mock
+    if _llm_structured is not _primary_llm_structured:
+        return _llm_structured.with_structured_output(schema)
+
+    primary_structured = _primary_llm_structured.with_structured_output(schema)
+    fallback_structured = _fallback_llm_structured.with_structured_output(schema)
+    return primary_structured.with_fallbacks([fallback_structured])
+
+
+# ── Retry-able exception types and decorators ──────────────────────────────────
+
+_RETRYABLE = (
+    TimeoutError,
+    ConnectionError,
+    OSError,
+)
+
+def _is_retryable(exc: BaseException) -> bool:
+    """Return True for transient LLM errors (rate limit, overload, timeout)."""
+    # Standard transient connection/timeout/OS exceptions must always be retried
+    if isinstance(exc, _RETRYABLE):
+        return True
+
+    msg = str(exc).lower()
+    # Permanent daily quota — do NOT retry; let .with_fallbacks() route to Groq
+    if "generaterequestsperday" in msg or "daily quota" in msg:
+        return False
+    return any(kw in msg for kw in (
+        "resource_exhausted", "unavailable", "503", "429",
+        "timeout", "rate limit", "overloaded",
+    ))
+
+
+def _llm_retry():
+    return retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception(_is_retryable),
+        reraise=True,
+        before_sleep=lambda retry_state: logger.warning(
+            "LLM call failed (attempt %d/3): %s — retrying",
+            retry_state.attempt_number,
+            retry_state.outcome.exception(),
+        ),
+    )
+
+
+def _invoke_llm_with_retry(llm, messages: list):
+    @_llm_retry()
+    def _call():
+        return llm.invoke(messages)
+    return _call()
 
 # ── Pydantic output schemas ───────────────────────────────────────────────────
 
@@ -172,7 +248,7 @@ def parse_resume_node(state: GraphState) -> dict:
     """
     logger.info("parse_resume_node: extracting structured data from resume")
 
-    structured_llm = _llm.with_structured_output(ParsedResume)
+    structured_llm = _make_structured_chain(ParsedResume)
 
     messages = [
         SystemMessage(content=_EXTRACTION_SYSTEM),
@@ -187,7 +263,7 @@ def parse_resume_node(state: GraphState) -> dict:
         ),
     ]
 
-    result: ParsedResume = structured_llm.invoke(messages)
+    result: ParsedResume = _invoke_llm_with_retry(structured_llm, messages)
     logger.info(
         "parse_resume_node: done — skills=%d experience_level=%s",
         len(result.skills),
@@ -203,7 +279,7 @@ def parse_jd_node(state: GraphState) -> dict:
     """
     logger.info("parse_jd_node: extracting structured data from JD")
 
-    structured_llm = _llm.with_structured_output(ParsedJD)
+    structured_llm = _make_structured_chain(ParsedJD)
 
     messages = [
         SystemMessage(content=_EXTRACTION_SYSTEM),
@@ -218,7 +294,7 @@ def parse_jd_node(state: GraphState) -> dict:
         ),
     ]
 
-    result: ParsedJD = structured_llm.invoke(messages)
+    result: ParsedJD = _invoke_llm_with_retry(structured_llm, messages)
     logger.info(
         "parse_jd_node: done — role=%s required_skills=%d",
         result.role_title,
@@ -235,7 +311,7 @@ def gap_analysis_node(state: GraphState) -> dict:
     """
     logger.info("gap_analysis_node: running gap analysis")
 
-    structured_llm = _llm.with_structured_output(GapReport)
+    structured_llm = _make_structured_chain(GapReport)
 
     messages = [
         SystemMessage(content=_GAP_SYSTEM),
@@ -249,7 +325,7 @@ def gap_analysis_node(state: GraphState) -> dict:
         ),
     ]
 
-    result: GapReport = structured_llm.invoke(messages)
+    result: GapReport = _invoke_llm_with_retry(structured_llm, messages)
     logger.info(
         "gap_analysis_node: done — match_score=%d missing_skills=%d",
         result.match_score,

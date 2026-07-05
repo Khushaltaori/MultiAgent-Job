@@ -262,7 +262,7 @@ async def test_state_persists_across_interrupt_resume():
 @pytest.mark.asyncio
 async def test_full_interview_completes():
     """
-    Three complete Q&A cycles must route to feedback_node (END),
+    Five complete Q&A cycles must route to feedback_node (END),
     and feedback_report must be populated with overall_score.
     """
     mock_llm = _make_mock_llm()
@@ -274,6 +274,8 @@ async def test_full_interview_completes():
         "I used Redis for session caching in production.",
         "I deployed with Docker Compose and Kubernetes.",
         "I designed PostgreSQL schemas for e-commerce.",
+        "I optimized latency by adding caching layers.",
+        "I wrote comprehensive unit tests with pytest.",
     ]
 
     with (

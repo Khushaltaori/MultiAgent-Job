@@ -16,6 +16,7 @@ class UserInDB(BaseModel):
 
     id: str | None = Field(None, alias="_id")
     email: EmailStr
+    name: str = ""                            # display name entered at registration
     hashed_password: str
     created_at: datetime = Field(default_factory=datetime.utcnow)
     is_active: bool = True
@@ -28,6 +29,7 @@ class UserInDB(BaseModel):
 class UserRegisterRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
+    name: str = Field(default="", max_length=100, description="Display name")
 
 
 class UserLoginRequest(BaseModel):
@@ -39,6 +41,7 @@ class UserLoginRequest(BaseModel):
 
 class UserPublic(BaseModel):
     email: EmailStr
+    name: str = ""
     created_at: datetime
 
 
@@ -57,6 +60,7 @@ class TokenPayload(BaseModel):
     sub: str  # user email or id
     exp: int
     type: str  # "access" | "refresh"
+    name: str = ""  # display name embedded in access tokens
 
 
 # ── Resume document ───────────────────────────────────────────────────────────

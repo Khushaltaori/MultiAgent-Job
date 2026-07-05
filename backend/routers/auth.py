@@ -47,6 +47,7 @@ async def register(
     db = get_database()
     doc = UserInDB(
         email=body.email,
+        name=body.name,
         hashed_password=hash_password(body.password),
     )
 
@@ -60,7 +61,7 @@ async def register(
             detail="A user with this email already exists.",
         )
 
-    return UserPublic(email=doc.email, created_at=doc.created_at)
+    return UserPublic(email=doc.email, name=doc.name, created_at=doc.created_at)
 
 
 # ── /login ────────────────────────────────────────────────────────────────────
@@ -85,7 +86,8 @@ async def login(
             detail="Incorrect email or password.",
         )
 
-    access_token = create_access_token(body.email)
+    stored_name: str = raw.get("name", "")
+    access_token = create_access_token(body.email, name=stored_name)
     refresh_token = create_refresh_token(body.email)
 
     # Set the refresh token as a secure, HTTP-only cookie

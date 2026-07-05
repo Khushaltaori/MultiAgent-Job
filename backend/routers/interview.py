@@ -121,7 +121,7 @@ async def _stream_ai_question(
                 data_str=json.dumps({
                     "thread_id": thread_id,
                     "questions_asked": questions_asked,
-                    "max_questions": 3,
+                    "max_questions": _ig.MAX_QUESTIONS,
                     "status": "awaiting_answer",
                 }),
                 event="interrupt",
@@ -163,9 +163,13 @@ async def start_interview(
     clean_resume = sanitize_text(body.resume_text)
     clean_jd = sanitize_text(body.jd_text)
 
+    # Extract candidate name from JWT payload
+    candidate_name = current_user.name or current_user.sub.split("@")[0] or "Candidate"
+
     initial_state = {
         "resume_text": clean_resume,
         "jd_text": clean_jd,
+        "candidate_name": candidate_name,
         "parsed_resume": {},
         "parsed_jd": {},
         "gap_report": {},
@@ -310,7 +314,7 @@ async def get_feedback_report(
             status_code=status.HTTP_202_ACCEPTED,
             detail=(
                 f"Interview still in progress. "
-                f"{snapshot.values.get('questions_asked', 0)}/3 questions answered."
+                f"{snapshot.values.get('questions_asked', 0)}/{_ig.MAX_QUESTIONS} questions answered."
             ),
         )
 

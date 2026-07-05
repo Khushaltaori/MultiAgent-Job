@@ -20,6 +20,15 @@ from main import app
 
 client = TestClient(app, raise_server_exceptions=True)
 
+@pytest.fixture(scope="module", autouse=True)
+def start_app():
+    """
+    Wrap all tests in this module with the FastAPI lifespan so that
+    connect_to_mongo() is called before any test runs.
+    """
+    with client:
+        yield
+
 # ── fixtures ──────────────────────────────────────────────────────────────────
 
 TEST_EMAIL = "smoketest_user@example.com"
@@ -37,8 +46,18 @@ def cleanup_test_user():
     import asyncio
 
     async def _delete():
-        db = get_database()
-        await db["users"].delete_many({"email": TEST_EMAIL})
+        from pymongo import AsyncMongoClient
+        from app.config import settings
+        local_client = AsyncMongoClient(
+            settings.MONGO_URI,
+            tlsAllowInvalidCertificates=True,
+            serverSelectionTimeoutMS=10000,
+        )
+        try:
+            db = local_client[settings.MONGO_DB_NAME]
+            await db["users"].delete_many({"email": TEST_EMAIL})
+        finally:
+            await local_client.aclose()
 
     # Run cleanup before the test
     asyncio.get_event_loop().run_until_complete(_delete())

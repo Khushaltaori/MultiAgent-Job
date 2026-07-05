@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str   # read from GEMINI_API_KEY in .env
     GEMINI_MODEL: str = "gemini-2.5-flash-lite"
 
+    # Groq API Fallback
+    GROQ_API_KEY: str | None = None
+
     # Environment
     ENVIRONMENT: str = "development"
 

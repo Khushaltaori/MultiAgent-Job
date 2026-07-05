@@ -80,9 +80,18 @@ app.add_middleware(SlowAPIMiddleware)
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
 # credentials=True is required for the browser to send/receive the refresh cookie.
+origins = [
+    settings.FRONTEND_ORIGIN,
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.FRONTEND_ORIGIN],
+    allow_origins=origins,
     allow_credentials=True,  # needed for HTTP-only cookie
     allow_methods=["*"],
     allow_headers=["*"],
