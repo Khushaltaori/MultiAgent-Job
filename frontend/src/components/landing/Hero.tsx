@@ -28,7 +28,7 @@ export function Hero({ onGetStarted }: HeroProps) {
           </div>
 
           {/* Headline */}
-          <h1 className="font-headline text-headline-lg md:text-headline-xl text-on-surface font-extrabold tracking-tight leading-[1.1] max-w-xl">
+          <h1 className="font-headline text-5xl sm:text-6xl md:text-7xl text-on-surface font-extrabold tracking-tight leading-[1.05] max-w-2xl">
             Own Your Preparation.<br />
             <span className="text-transparent bg-clip-text bg-gradient-to-r from-primary to-primary-container">
               Close Your Skill Gaps.
