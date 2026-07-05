@@ -61,6 +61,12 @@ export default {
         body: ['Inter', 'sans-serif'],
         label: ['Geist', 'sans-serif'],
       },
+      fontSize: {
+        'headline-sm': ['1.25rem', { lineHeight: '1.25', fontWeight: '700' }],
+        'headline-md': ['1.75rem', { lineHeight: '1.2', fontWeight: '700' }],
+        'headline-lg': ['2.5rem', { lineHeight: '1.15', fontWeight: '800' }],
+        'headline-xl': ['3.75rem', { lineHeight: '1.1', fontWeight: '800' }],
+      },
       spacing: {
         xs: '4px',
         sm: '8px',
