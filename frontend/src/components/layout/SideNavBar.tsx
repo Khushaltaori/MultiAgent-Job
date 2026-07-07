@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import type { NavItem } from '../../types';
 import { Button } from '../ui/Button';
 import { useToast } from '../../hooks/useToast';
+import { useAuth } from '../../context/AuthContext';
 
 interface SideNavBarProps {
   activePath: string;
@@ -11,6 +12,7 @@ interface SideNavBarProps {
 export function SideNavBar({ activePath }: SideNavBarProps) {
   const navigate = useNavigate();
   const { showToast } = useToast();
+  const { logout } = useAuth();
 
   const navItems: NavItem[] = [
     { label: 'Dashboard', icon: 'dashboard', path: '/dashboard' },
@@ -19,9 +21,9 @@ export function SideNavBar({ activePath }: SideNavBarProps) {
     { label: 'Performance', icon: 'monitoring', path: '/performance' },
   ];
 
-  const handleLogout = (e: MouseEvent) => {
+  const handleLogout = async (e: MouseEvent) => {
     e.preventDefault();
-    showToast('Logged out successfully');
+    await logout();
     navigate('/');
   };
 

@@ -178,31 +178,23 @@ export function AuthModal({ isOpen, onClose, initialTab = 'login' }: AuthModalPr
         {/* Social Authentication */}
         <div className="grid grid-cols-2 gap-sm">
           <Button
+            type="button"
             variant="outline"
             size="sm"
             onClick={() => {
-              setIsSubmitting(true);
-              setTimeout(() => {
-                setIsSubmitting(false);
-                onClose();
-                showToast('Signed in via Google');
-                navigate('/dashboard');
-              }, 1200);
+              const backendHost = window.location.hostname;
+              window.location.href = `http://${backendHost}:8000/api/v1/auth/google/login`;
             }}
           >
             Google
           </Button>
           <Button
+            type="button"
             variant="outline"
             size="sm"
             onClick={() => {
-              setIsSubmitting(true);
-              setTimeout(() => {
-                setIsSubmitting(false);
-                onClose();
-                showToast('Signed in via GitHub');
-                navigate('/dashboard');
-              }, 1200);
+              const backendHost = window.location.hostname;
+              window.location.href = `http://${backendHost}:8000/api/v1/auth/github/login`;
             }}
           >
             GitHub

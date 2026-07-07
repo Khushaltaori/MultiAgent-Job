@@ -51,7 +51,7 @@ export function SkillsGapPanel({ matchingSkills, skillGaps }: SkillsGapPanelProp
             <span>Identified Gaps ({skillGaps.length})</span>
           </div>
 
-          <div className="flex flex-col gap-xs py-xs">
+          <div className="mt-4 space-y-2 max-h-[420px] overflow-y-auto pr-2 custom-scrollbar">
             {skillGaps.map((gap, index) => (
               <div
                 key={index}

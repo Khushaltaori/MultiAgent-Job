@@ -101,29 +101,30 @@ export function GapAnalysisPage() {
         </div>
       </div>
 
-      {/* 12-col Bento Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-lg items-stretch">
-        
-        {/* Match Score Card (4 cols) */}
-        <div className="lg:col-span-4 h-full">
+      {/* Top Row Grid: Centered Dial (1/3) + Skills Coverage (2/3) */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-stretch">
+        {/* Match Score Card (1/3 width) */}
+        <div className="lg:col-span-1 h-full flex flex-col items-center justify-center text-center py-12">
           <MatchScoreCard score={score} />
         </div>
 
-        {/* Skills Coverage Panel (8 cols) */}
-        <div className="lg:col-span-8 h-full">
+        {/* Skills Coverage Panel (2/3 width) */}
+        <div className="lg:col-span-2 h-full">
           <SkillsGapPanel matchingSkills={matchingSkills} skillGaps={skillGaps} />
         </div>
+      </div>
 
-        {/* Coaching Recommendations (7 cols) */}
-        <div className="lg:col-span-7 h-full">
+      {/* Bottom Row Grid: AI Recommendations (1/2) + Launch Interview CTA (1/2) */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch">
+        {/* Coaching Recommendations (1/2 width) */}
+        <div className="h-full">
           <AIRecommendations recommendations={recommendations} />
         </div>
 
-        {/* Launch Interview CTA (5 cols) */}
-        <div className="lg:col-span-5 h-full">
+        {/* Launch Interview CTA (1/2 width) */}
+        <div className="h-full">
           <LaunchInterviewCTA />
         </div>
-
       </div>
 
       {/* Footer insight bar */}

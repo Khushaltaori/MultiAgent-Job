@@ -74,13 +74,15 @@ logger = logging.getLogger(__name__)
 # ── LLM (primary Gemini + fallback Groq) ──────────────────────────────────────
 
 _primary_llm = ChatGoogleGenerativeAI(
-    model=settings.GEMINI_MODEL,        # gemini-2.5-flash-lite from .env
+    model="gemini-3.5-flash",
+    thinking_level="minimal",
     temperature=0.4,
     google_api_key=settings.GEMINI_API_KEY,
 )
 
 _primary_llm_structured = ChatGoogleGenerativeAI(
-    model=settings.GEMINI_MODEL,
+    model="gemini-3.5-flash",
+    thinking_level="minimal",
     temperature=0,                      # deterministic for structured extraction
     google_api_key=settings.GEMINI_API_KEY,
 )
@@ -98,7 +100,7 @@ _fallback_llm_structured = ChatGroq(
 )
 
 # Resilient LLM chain for non-structured (conversational) calls
-_llm = _primary_llm.with_fallbacks([_fallback_llm])
+_llm = _primary_llm.with_fallbacks([_fallback_llm], exceptions_to_handle=[Exception])
 
 # Defined at module scope for unit testing patch/mock compatibility.
 # If a test patches _llm_structured, _make_structured_chain will yield the test mock.
@@ -111,7 +113,7 @@ _llm_structured = _primary_llm_structured
 def _make_structured_chain(schema):
     """
     Returns a resilient structured-output chain:
-      primary.with_structured_output(schema).with_fallbacks([fallback.with_structured_output(schema)])
+      primary.with_structured_output(schema).with_fallbacks([fallback.with_structured_output(schema)], exceptions_to_handle=[Exception])
 
     This is the ONLY correct pattern — applying .with_structured_output() BEFORE .with_fallbacks()
     ensures Groq receives a fully wired parsing chain when Gemini fails.
@@ -122,7 +124,7 @@ def _make_structured_chain(schema):
 
     primary_structured = _primary_llm_structured.with_structured_output(schema)
     fallback_structured = _fallback_llm_structured.with_structured_output(schema)
-    return primary_structured.with_fallbacks([fallback_structured])
+    return primary_structured.with_fallbacks([fallback_structured], exceptions_to_handle=[Exception])
 
 # ── Retry-able exception types ────────────────────────────────────────────────
 
@@ -138,23 +140,20 @@ _RETRYABLE = (
 def _is_retryable(exc: BaseException) -> bool:
     """Return True for transient LLM errors (rate limit, overload, timeout).
 
-    IMPORTANT: Daily quota exhaustion (RESOURCE_EXHAUSTED with per-day quota IDs
-    like 'GenerateRequestsPerDay') must NOT be retried — Gemini will keep rejecting
-    every retry until midnight. Returning False here allows LangChain's .with_fallbacks()
-    mechanism to route the call to Groq immediately on the first failure.
+    IMPORTANT: Quota and rate limits must fail-fast to trigger the Groq fallback immediately
+    on the first attempt.
     """
     # Standard transient connection/timeout/OS exceptions must always be retried
     if isinstance(exc, _RETRYABLE):
         return True
 
     msg = str(exc).lower()
-    # Permanent daily quota — do NOT retry; let .with_fallbacks() route to Groq
-    if "generaterequestsperday" in msg or "daily quota" in msg:
+    # Permanent/transient quota or rate limits — fail-fast to trigger Groq immediately
+    if any(kw in msg for kw in ("generaterequestsperday", "quota", "rate limit", "429", "resource_exhausted")):
         return False
-    # Per-minute rate limits and transient server errors are worth retrying
+    # Transient server errors are worth retrying
     return any(kw in msg for kw in (
-        "resource_exhausted", "unavailable", "503", "429",
-        "timeout", "rate limit", "overloaded",
+        "unavailable", "503", "timeout", "overloaded",
     ))
 
 
@@ -285,6 +284,7 @@ class GraphState(TypedDict):
     resume_text: str
     jd_text: str
     candidate_name: str
+    user_id: str
 
     # Phase 2 – structured extraction
     parsed_resume: dict
@@ -545,7 +545,7 @@ def human_input_node(state: GraphState) -> dict:
 # ── Node: feedback_node ───────────────────────────────────────────────────────
 
 
-def feedback_node(state: GraphState) -> dict:
+async def feedback_node(state: GraphState) -> dict:
     """
     Generates the final graded feedback report from the full interview transcript.
     """
@@ -570,6 +570,37 @@ def feedback_node(state: GraphState) -> dict:
         )),
     ])
     logger.info("EXIT node=feedback_node overall_score=%d", result.overall_score)
+
+    # ── MongoDB Transcript & Metrics Storage ──────────────────────────────────
+    try:
+        from app.database import get_database
+        from datetime import datetime
+        db = get_database()
+
+        chat_history = state.get("chat_history", [])
+        serialized_transcript = [
+            {
+                "role": "interviewer" if getattr(msg, "type", "ai") == "ai" else "candidate",
+                "content": getattr(msg, "content", "")
+            }
+            for msg in chat_history
+        ]
+
+        db_document = {
+            "user_id": state.get("user_id", ""),
+            "role_title": state.get("parsed_jd", {}).get("role_title", "Software Engineer"),
+            "match_score": result.overall_score,
+            "created_at": datetime.utcnow(),
+            "transcript": serialized_transcript,
+            "question_feedback": result.per_question_feedback or [],
+            "action_items": result.areas_for_improvement or []
+        }
+
+        await db["interviews"].insert_one(db_document)
+        logger.info("Saved interview transcript to MongoDB collection ✓")
+    except Exception as db_exc:
+        logger.warning("Could not persist interview record to MongoDB: %s", db_exc)
+
     return {"feedback_report": result.model_dump()}
 
 

@@ -38,49 +38,57 @@ export function SessionHistoryTable({
 
             {/* Table Body */}
             <tbody className="divide-y divide-outline-variant/30 font-medium">
-              {history.map((row) => (
-                <tr
-                  key={row.id}
-                  className="hover:bg-surface-container-low/30 transition-colors"
-                >
-                  <td className="px-lg py-md font-mono text-body-sm text-on-surface-variant select-text">
-                    {row.date}
-                  </td>
-                  <td className="px-lg py-md select-text">
-                    <div className="flex items-center gap-sm">
-                      <span className="material-symbols-outlined text-md font-bold text-outline-variant select-none">
-                        {row.icon}
-                      </span>
-                      <span>{row.role}</span>
-                    </div>
-                  </td>
-                  <td className="px-lg py-md text-on-surface-variant select-text">
-                    {row.duration}
-                  </td>
-                  <td className="px-lg py-md text-center font-bold font-mono text-on-surface select-text">
-                    {row.score}%
-                  </td>
-                  <td className="px-lg py-md select-none">
-                    <span className={`px-2 py-[2px] rounded-full border text-[9px] font-bold uppercase tracking-wider ${
-                      row.score >= 80 
-                        ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
-                        : row.score >= 70
-                        ? 'bg-amber-500/10 border-amber-500/20 text-amber-400'
-                        : 'bg-rose-500/10 border-rose-500/20 text-rose-400'
-                    }`}>
-                      {row.matchLevel}
-                    </span>
-                  </td>
-                  <td className="px-lg py-md text-right select-none">
-                    <button
-                      onClick={() => onRehydrate(row.id)}
-                      className="text-label-sm font-bold text-primary hover:text-opacity-80 transition-colors uppercase font-label"
-                    >
-                      Rehydrate
-                    </button>
+              {history.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="px-lg py-xl text-center text-on-surface-variant font-medium select-none">
+                    Complete your first mock interview session to review progress!
                   </td>
                 </tr>
-              ))}
+              ) : (
+                history.map((row) => (
+                  <tr
+                    key={row.id}
+                    className="hover:bg-surface-container-low/30 transition-colors"
+                  >
+                    <td className="px-lg py-md font-mono text-body-sm text-on-surface-variant select-text">
+                      {row.date}
+                    </td>
+                    <td className="px-lg py-md select-text">
+                      <div className="flex items-center gap-sm">
+                        <span className="material-symbols-outlined text-md font-bold text-outline-variant select-none">
+                          {row.icon}
+                        </span>
+                        <span>{row.role}</span>
+                      </div>
+                    </td>
+                    <td className="px-lg py-md text-on-surface-variant select-text">
+                      {row.duration}
+                    </td>
+                    <td className="px-lg py-md text-center font-bold font-mono text-on-surface select-text">
+                      {row.score}%
+                    </td>
+                    <td className="px-lg py-md select-none">
+                      <span className={`px-2 py-[2px] rounded-full border text-[9px] font-bold uppercase tracking-wider ${
+                        row.score >= 80 
+                          ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
+                          : row.score >= 70
+                          ? 'bg-amber-500/10 border-amber-500/20 text-amber-400'
+                          : 'bg-rose-500/10 border-rose-500/20 text-rose-400'
+                      }`}>
+                        {row.matchLevel}
+                      </span>
+                    </td>
+                    <td className="px-lg py-md text-right select-none">
+                      <button
+                        onClick={() => onRehydrate(row.id)}
+                        className="text-label-sm font-bold text-primary hover:text-opacity-80 transition-colors uppercase font-label"
+                      >
+                        Rehydrate
+                      </button>
+                    </td>
+                  </tr>
+                ))
+              )}
             </tbody>
           </table>
         </div>

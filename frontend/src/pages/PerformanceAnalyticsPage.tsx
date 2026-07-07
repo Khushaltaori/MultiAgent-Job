@@ -4,10 +4,12 @@ import { NextStepsChecklist } from '../components/performance/NextStepsChecklist
 import { StarAccordion } from '../components/performance/StarAccordion';
 import { SessionHistoryTable } from '../components/performance/SessionHistoryTable';
 import { useToast } from '../hooks/useToast';
+import { useAuth } from '../context/AuthContext';
 import type { NextStep, StarSection, SessionHistoryRow } from '../types';
 
 export function PerformanceAnalyticsPage() {
   const { showToast } = useToast();
+  const { apiCall } = useAuth();
 
   // 1. Load feedback report from localStorage if it exists
   const [report, setReport] = useState<any | null>(null);
@@ -152,41 +154,82 @@ export function PerformanceAnalyticsPage() {
     },
   ];
 
-  const mockHistory: SessionHistoryRow[] = [
-    {
-      id: '1',
-      date: '2026-07-02',
-      role: 'Senior React Developer',
-      icon: 'javascript',
-      duration: '18 min',
-      score: 84,
-      matchLevel: 'Strong Match',
-    },
-    {
-      id: '2',
-      date: '2026-06-28',
-      role: 'AI Infrastructure Engineer',
-      icon: 'network_node',
-      duration: '22 min',
-      score: 76,
-      matchLevel: 'Potential Match',
-    },
-    {
-      id: '3',
-      date: '2026-06-15',
-      role: 'Full Stack Engineer',
-      icon: 'database',
-      duration: '15 min',
-      score: 68,
-      matchLevel: 'Needs Gaps Closed',
-    },
-  ];
+  const [history, setHistory] = useState<SessionHistoryRow[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState(true);
+
+  useEffect(() => {
+    const fetchHistory = async () => {
+      try {
+        const response = await apiCall('/api/v1/interview/history');
+        if (response.ok) {
+          const data = await response.json();
+          const mapped: SessionHistoryRow[] = data.map((item: any) => {
+            const score = item.match_score ?? 0;
+            const matchLevel = score >= 80 
+              ? 'Strong Match' 
+              : score >= 70 
+              ? 'Potential Match' 
+              : 'Needs Gaps Closed';
+            
+            // Format created_at date nicely
+            let dateStr = 'Recent';
+            if (item.created_at) {
+              try {
+                dateStr = item.created_at.split('T')[0];
+              } catch (e) {}
+            }
+            
+            // Determine icon based on role
+            let icon = 'terminal';
+            const role = (item.role_title || '').toLowerCase();
+            if (role.includes('react') || role.includes('frontend') || role.includes('js') || role.includes('javascript') || role.includes('ui')) {
+              icon = 'javascript';
+            } else if (role.includes('infra') || role.includes('cloud') || role.includes('network') || role.includes('devops')) {
+              icon = 'network_node';
+            } else if (role.includes('database') || role.includes('data') || role.includes('sql') || role.includes('mongo') || role.includes('backend')) {
+              icon = 'database';
+            }
+            
+            return {
+              id: item.id || String(Math.random()),
+              date: dateStr,
+              role: item.role_title || 'Software Engineer',
+              icon: icon,
+              duration: '15 min',
+              score: score,
+              matchLevel: matchLevel,
+              rawReport: item
+            };
+          });
+          setHistory(mapped);
+        }
+      } catch (err) {
+        console.error('Failed to load interview history logs', err);
+      } finally {
+        setLoadingHistory(false);
+      }
+    };
+    fetchHistory();
+  }, []);
 
   const handleRehydrate = (id: string) => {
     // collapse all sections except first (S)
     setOpenSectionId('S');
-    const selected = mockHistory.find((h) => h.id === id);
-    showToast(selected ? `Session Rehydrated: ${selected.role}` : 'Session Rehydrated');
+    const selected = history.find((h) => h.id === id);
+    if (selected && (selected as any).rawReport) {
+      const raw = (selected as any).rawReport;
+      const rehydratedReport = {
+        overall_score: raw.match_score ?? 0,
+        per_question_feedback: raw.question_feedback || [],
+        areas_for_improvement: raw.action_items || [],
+        action_items: raw.action_items || [],
+        final_recommendation: `Recommended match for ${raw.role_title}`
+      };
+      setReport(rehydratedReport);
+      showToast(`Session Rehydrated: ${selected.role}`);
+    } else {
+      showToast('Session Rehydrated');
+    }
   };
 
   return (
@@ -227,10 +270,16 @@ export function PerformanceAnalyticsPage() {
 
       {/* Session History Table (12 cols) */}
       <div className="w-full mt-xs">
-        <SessionHistoryTable
-          history={mockHistory}
-          onRehydrate={handleRehydrate}
-        />
+        {loadingHistory ? (
+          <div className="text-center p-lg bg-surface-container/30 border border-outline-variant/60 rounded-xl text-on-surface-variant font-medium animate-pulse select-none">
+            Loading session history logs...
+          </div>
+        ) : (
+          <SessionHistoryTable
+            history={history}
+            onRehydrate={handleRehydrate}
+          />
+        )}
       </div>
 
     </div>

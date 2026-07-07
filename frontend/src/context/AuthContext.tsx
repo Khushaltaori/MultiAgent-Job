@@ -78,10 +78,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return response;
   };
 
-  // Perform initial check on mount using /refresh to restore session
+  // Perform initial check on mount using /refresh to restore session or URL query token
   useEffect(() => {
     const initAuth = async () => {
       try {
+        // 1. Check if token is present in the URL search parameters (returned from OAuth2 redirect)
+        const urlParams = new URLSearchParams(window.location.search);
+        const urlToken = urlParams.get('token');
+        
+        if (urlToken) {
+          tokenStore.setToken(urlToken);
+          // Parse user payload from token
+          const payloadBase64 = urlToken.split('.')[1];
+          const decoded = JSON.parse(atob(payloadBase64));
+          setUser({ email: decoded.sub, name: decoded.name || '' });
+          
+          // Clear token from the address bar to keep it clean
+          window.history.replaceState({}, document.title, window.location.pathname);
+          showToast('Signed in successfully!');
+          setLoading(false);
+          return;
+        }
+
+        // 2. Otherwise, fall back to /refresh to restore session via HTTP-only cookie
         const response = await fetch(`${API_BASE_URL}/api/v1/auth/refresh`, {
           method: 'POST',
           credentials: 'include',

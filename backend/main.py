@@ -74,9 +74,12 @@ app = FastAPI(
 )
 
 # Attach limiter to the app state (required by slowapi)
+from starlette.middleware.sessions import SessionMiddleware
+
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
 app.add_middleware(SlowAPIMiddleware)
+app.add_middleware(SessionMiddleware, secret_key=settings.SECRET_KEY)
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
 # credentials=True is required for the browser to send/receive the refresh cookie.

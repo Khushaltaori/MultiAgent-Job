@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ChatTranscript } from '../components/interview/ChatTranscript';
 import { MessageInputBar } from '../components/interview/MessageInputBar';
@@ -12,6 +12,7 @@ export function InterviewRoomPage() {
   const navigate = useNavigate();
   const { showToast } = useToast();
   const { resumeText, jdText, loadingLatest } = useJobCoach();
+  const hasTriggeredStart = useRef(false);
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [threadId, setThreadId] = useState<string | null>(null);
@@ -149,7 +150,8 @@ export function InterviewRoomPage() {
   useEffect(() => {
     if (loadingLatest) return;
     if (!resumeText || !jdText) return;
-    if (hasStarted) return;
+    if (hasTriggeredStart.current) return;
+    hasTriggeredStart.current = true;
 
     setHasStarted(true);
     setIsThinking(true);
@@ -180,7 +182,7 @@ export function InterviewRoomPage() {
     };
 
     startInterviewSession();
-  }, [loadingLatest, resumeText, jdText, hasStarted]);
+  }, [loadingLatest, resumeText, jdText]);
 
   const handleSend = async (text: string) => {
     if (isLocked || !threadId) return;

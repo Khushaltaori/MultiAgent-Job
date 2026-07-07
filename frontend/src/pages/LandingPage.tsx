@@ -1,4 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext';
 import { TopNavBar } from '../components/layout/TopNavBar';
 import { Hero } from '../components/landing/Hero';
 import { FeatureGrid } from '../components/landing/FeatureGrid';
@@ -7,8 +9,16 @@ import { AuthModal } from '../components/landing/AuthModal';
 import { GlassCard } from '../components/ui/GlassCard';
 
 export function LandingPage() {
+  const { user } = useAuth();
+  const navigate = useNavigate();
   const [isAuthOpen, setIsAuthOpen] = useState(false);
   const [authTab, setAuthTab] = useState<'login' | 'register'>('login');
+
+  useEffect(() => {
+    if (user) {
+      navigate('/dashboard', { replace: true });
+    }
+  }, [user, navigate]);
 
   const handleOpenAuth = (tab: 'login' | 'register' = 'login') => {
     setAuthTab(tab);

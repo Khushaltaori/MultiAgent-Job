@@ -36,7 +36,7 @@ export function AIRecommendations({ recommendations }: AIRecommendationsProps) {
         Coaching Recommendations
       </h3>
 
-      <div className="flex flex-col gap-md z-10">
+      <div className="space-y-4 max-h-[480px] overflow-y-auto pr-2 custom-scrollbar z-10">
         {recommendations.map((item, index) => {
           const borderStyle = borderColors[item.accentColor] || 'border-l-primary';
           const iconStyle = iconColors[item.accentColor] || 'text-primary bg-primary/10';

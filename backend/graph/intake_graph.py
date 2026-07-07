@@ -54,7 +54,8 @@ logger = logging.getLogger(__name__)
 # ── LLM (primary Gemini + fallback Groq) ──────────────────────────────────────
 
 _primary_llm_structured = ChatGoogleGenerativeAI(
-    model=settings.GEMINI_MODEL,
+    model="gemini-3.5-flash",
+    thinking_level="minimal",
     temperature=0,                      # deterministic structured extraction
     google_api_key=settings.GEMINI_API_KEY,
 )
@@ -72,7 +73,7 @@ _llm_structured = _primary_llm_structured
 def _make_structured_chain(schema):
     """
     Returns a resilient structured-output chain:
-      primary.with_structured_output(schema).with_fallbacks([fallback.with_structured_output(schema)])
+      primary.with_structured_output(schema).with_fallbacks([fallback.with_structured_output(schema)], exceptions_to_handle=[Exception])
     """
     # If a unit test has patched _llm_structured, call with_structured_output on the mock
     if _llm_structured is not _primary_llm_structured:
@@ -80,7 +81,7 @@ def _make_structured_chain(schema):
 
     primary_structured = _primary_llm_structured.with_structured_output(schema)
     fallback_structured = _fallback_llm_structured.with_structured_output(schema)
-    return primary_structured.with_fallbacks([fallback_structured])
+    return primary_structured.with_fallbacks([fallback_structured], exceptions_to_handle=[Exception])
 
 
 # ── Retry-able exception types and decorators ──────────────────────────────────
@@ -98,12 +99,11 @@ def _is_retryable(exc: BaseException) -> bool:
         return True
 
     msg = str(exc).lower()
-    # Permanent daily quota — do NOT retry; let .with_fallbacks() route to Groq
-    if "generaterequestsperday" in msg or "daily quota" in msg:
+    # Quota and rate limits must fail-fast to trigger the Groq fallback immediately
+    if any(kw in msg for kw in ("generaterequestsperday", "quota", "rate limit", "429", "resource_exhausted")):
         return False
     return any(kw in msg for kw in (
-        "resource_exhausted", "unavailable", "503", "429",
-        "timeout", "rate limit", "overloaded",
+        "unavailable", "503", "timeout", "overloaded",
     ))
 
 
@@ -126,6 +126,13 @@ def _invoke_llm_with_retry(llm, messages: list):
     def _call():
         return llm.invoke(messages)
     return _call()
+
+
+async def _ainvoke_llm_with_retry(llm, messages: list):
+    @_llm_retry()
+    async def _call():
+        return await llm.ainvoke(messages)
+    return await _call()
 
 # ── Pydantic output schemas ───────────────────────────────────────────────────
 
@@ -241,7 +248,7 @@ _GAP_SYSTEM = (
 # ── Node functions ────────────────────────────────────────────────────────────
 
 
-def parse_resume_node(state: GraphState) -> dict:
+async def parse_resume_node(state: GraphState) -> dict:
     """
     Parse the resume text into a structured ParsedResume.
     Uses with_structured_output (current stable LangChain API).
@@ -263,7 +270,7 @@ def parse_resume_node(state: GraphState) -> dict:
         ),
     ]
 
-    result: ParsedResume = _invoke_llm_with_retry(structured_llm, messages)
+    result: ParsedResume = await _ainvoke_llm_with_retry(structured_llm, messages)
     logger.info(
         "parse_resume_node: done — skills=%d experience_level=%s",
         len(result.skills),
@@ -272,7 +279,7 @@ def parse_resume_node(state: GraphState) -> dict:
     return {"parsed_resume": result.model_dump()}
 
 
-def parse_jd_node(state: GraphState) -> dict:
+async def parse_jd_node(state: GraphState) -> dict:
     """
     Parse the job description text into a structured ParsedJD.
     Uses with_structured_output (current stable LangChain API).
@@ -294,7 +301,7 @@ def parse_jd_node(state: GraphState) -> dict:
         ),
     ]
 
-    result: ParsedJD = _invoke_llm_with_retry(structured_llm, messages)
+    result: ParsedJD = await _ainvoke_llm_with_retry(structured_llm, messages)
     logger.info(
         "parse_jd_node: done — role=%s required_skills=%d",
         result.role_title,
@@ -303,7 +310,7 @@ def parse_jd_node(state: GraphState) -> dict:
     return {"parsed_jd": result.model_dump()}
 
 
-def gap_analysis_node(state: GraphState) -> dict:
+async def gap_analysis_node(state: GraphState) -> dict:
     """
     Compare parsed_resume against parsed_jd and produce a GapReport.
     Both parallel predecessors have completed by the time this runs.
@@ -325,7 +332,7 @@ def gap_analysis_node(state: GraphState) -> dict:
         ),
     ]
 
-    result: GapReport = _invoke_llm_with_retry(structured_llm, messages)
+    result: GapReport = await _ainvoke_llm_with_retry(structured_llm, messages)
     logger.info(
         "gap_analysis_node: done — match_score=%d missing_skills=%d",
         result.match_score,

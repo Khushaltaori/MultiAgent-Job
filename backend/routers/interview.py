@@ -84,24 +84,37 @@ async def _stream_ai_question(
     import graph.interview_graph as _ig
 
     try:
-        async for event in _ig.interview_graph.astream(
+        async for event in _ig.interview_graph.astream_events(
             input_payload,
             config=config,
-            stream_mode="messages",   # yields (message_chunk, metadata) tuples
+            version="v2",
         ):
-            # stream_mode="messages" yields (chunk, metadata) pairs
-            if isinstance(event, tuple):
-                chunk, metadata = event
-                # Only stream AI message content tokens from the question node
-                if (
-                    isinstance(chunk, AIMessage)
-                    and chunk.content
-                    and metadata.get("langgraph_node") == "ask_question_node"
-                ):
-                    yield format_sse_event(
-                        data_str=json.dumps(chunk.content),
-                        event="token",
-                    )
+            kind = event.get("event")
+            if kind == "on_chat_model_stream":
+                metadata = event.get("metadata", {})
+                if metadata.get("langgraph_node") == "ask_question_node":
+                    chunk = event["data"].get("chunk")
+                    if chunk and chunk.content:
+                        text_val = chunk.content
+                        if isinstance(text_val, list):
+                            parts = []
+                            for part in text_val:
+                                if isinstance(part, dict):
+                                    if part.get("type") == "text":
+                                        parts.append(part.get("text", ""))
+                                elif isinstance(part, str):
+                                    parts.append(part)
+                            text_str = "".join(parts)
+                        elif isinstance(text_val, dict):
+                            text_str = text_val.get("text", "") or text_val.get("content", "") or str(text_val)
+                        else:
+                            text_str = str(text_val)
+
+                        if text_str:
+                            yield format_sse_event(
+                                data_str=json.dumps(text_str),
+                                event="token",
+                            )
 
         # After streaming completes, check final graph state (async)
         snapshot = await _ig.interview_graph.aget_state(config)
@@ -170,6 +183,7 @@ async def start_interview(
         "resume_text": clean_resume,
         "jd_text": clean_jd,
         "candidate_name": candidate_name,
+        "user_id": current_user.sub,
         "parsed_resume": {},
         "parsed_jd": {},
         "gap_report": {},
@@ -189,7 +203,10 @@ async def start_interview(
         async for event in _stream_ai_question(thread_id, config, initial_state):
             yield event
 
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(
+        event_generator(),
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
 
 
 # ── POST /respond ─────────────────────────────────────────────────────────────
@@ -254,7 +271,10 @@ async def respond_to_interview(
         async for event in _stream_ai_question(body.thread_id, config, resume_command):
             yield event
 
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(
+        event_generator(),
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
 
 
 # ── GET /state ────────────────────────────────────────────────────────────────
@@ -332,3 +352,28 @@ async def get_feedback_report(
         "parsed_resume": snapshot.values.get("parsed_resume", {}),
         "parsed_jd": snapshot.values.get("parsed_jd", {}),
     }
+
+
+@router.get(
+    "/history",
+    summary="Get interview session history for the logged in user",
+)
+async def get_interview_history(
+    current_user: TokenPayload = Depends(get_current_user),
+) -> list:
+    from app.database import get_database
+    db = get_database()
+    
+    interviews_cursor = db["interviews"].find(
+        {"user_id": current_user.sub}
+    ).sort("created_at", -1)
+    
+    interviews = []
+    async for doc in interviews_cursor:
+        doc["id"] = str(doc["_id"])
+        del doc["_id"]
+        if "created_at" in doc and hasattr(doc["created_at"], "isoformat"):
+            doc["created_at"] = doc["created_at"].isoformat()
+        interviews.append(doc)
+        
+    return interviews

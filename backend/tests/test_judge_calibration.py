@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from graph.interview_graph import feedback_node
 
-def test_judge_sycophancy_and_empty_responses():
+async def test_judge_sycophancy_and_empty_responses():
     # Construct a transcript where the candidate responds "no I don't know", "no idea", "not sure"
     chat_history = [
         AIMessage(content="Can you explain how you would design a rate limiter using Redis?"),
@@ -48,7 +48,7 @@ def test_judge_sycophancy_and_empty_responses():
     }
     
     # Run the feedback_node which invokes Gemini with FeedbackReport structured output
-    result = feedback_node(state)
+    result = await feedback_node(state)
     
     feedback_report = result.get("feedback_report", {})
     assert feedback_report, "Feedback report should not be empty"
