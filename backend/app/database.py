@@ -9,6 +9,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
+# pyrefly: ignore [missing-import]
 from pymongo import AsyncMongoClient
 from pymongo.errors import ConnectionFailure
 
